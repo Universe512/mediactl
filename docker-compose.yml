@@ -15,6 +15,7 @@ services:
       DOCKER_HOST: http://docker-proxy
       DOCKER_PORT: 2375
       REQUIRE_CF_ACCESS: ${REQUIRE_CF_ACCESS:-true}
+      LOCAL_ACCESS_TOKEN: ${LOCAL_ACCESS_TOKEN:?Set LOCAL_ACCESS_TOKEN in .env}
     volumes:
       - mediactl-data:/data
       - ./secrets:/run/secrets/ssh:ro
@@ -44,6 +45,8 @@ services:
       DASHBOARD_SUBDOMAIN: ${DASHBOARD_SUBDOMAIN:-media}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${LOCAL_PORT:-8088}:8080"
     depends_on: [portal, manager]
     networks: [gateway]
 
@@ -51,6 +54,7 @@ services:
     image: cloudflare/cloudflared:2026.7.3
     restart: unless-stopped
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    profiles: [cloudflare]
     depends_on: [gateway]
     networks: [gateway]
 

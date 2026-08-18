@@ -17,9 +17,14 @@ test("builds the mediactl application", async () => {
   assert.match(manager, /WebSocketServer/);
   assert.match(manager, /docker\.getContainer/);
   assert.match(manager, /SSHClient/);
-  assert.doesNotMatch(compose, /^\s+ports:/m);
+  assert.match(compose, /LOCAL_BIND_ADDRESS:-127\.0\.0\.1/);
+  assert.match(compose, /LOCAL_ACCESS_TOKEN/);
+  assert.match(compose, /profiles: \[cloudflare\]/);
   assert.match(compose, /docker-socket-proxy/);
   assert.match(compose, /cloudflare\/cloudflared/);
   assert.match(caddy, /reverse_proxy manager:4000/);
+  assert.match(caddy, /header_up X-Mediactl-Local 1/);
+  assert.match(manager, /timingSafeEqual/);
+  assert.match(page, /sessionStorage/);
   await access(new URL("../dist/standalone/server.js", import.meta.url));
 });
