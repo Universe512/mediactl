@@ -10,7 +10,9 @@
   handle @dashboard {
     @manager path /api/* /ws/*
     handle @manager {
-      reverse_proxy manager:4000
+      reverse_proxy manager:4000 {
+        header_up -X-Mediactl-Local
+      }
     }
     handle {
       reverse_proxy portal:3000
@@ -20,6 +22,26 @@
   # Every other hostname is resolved dynamically from /data/config.yaml.
   # This lets the dashboard change service IPs and ports without reloading Caddy.
   handle {
-    reverse_proxy manager:4000
+    reverse_proxy manager:4000 {
+      header_up -X-Mediactl-Local
+    }
+  }
+}
+
+# Direct LAN entry point. Docker publishes this listener only on the address
+# selected by LOCAL_BIND_ADDRESS. The marker header is created here and cannot
+# be supplied through the Cloudflare listener above.
+:8080 {
+  encode zstd gzip
+
+  @manager path /api/* /ws/*
+  handle @manager {
+    reverse_proxy manager:4000 {
+      header_up X-Mediactl-Local 1
+    }
+  }
+
+  handle {
+    reverse_proxy portal:3000
   }
 }

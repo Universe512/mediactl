@@ -12,6 +12,7 @@ import { findService, findTerminal, loadConfig, publicConfig, saveConfig } from 
 const port = Number(process.env.PORT || 4000);
 const keyDir = process.env.SSH_KEY_DIR || "/run/secrets/ssh";
 const requireAccess = process.env.REQUIRE_CF_ACCESS === "true";
+const localAccessToken = process.env.LOCAL_ACCESS_TOKEN || "";
 const dockerHost = (process.env.DOCKER_HOST || "docker-proxy").replace(/^https?:\/\//, "");
 const docker = new Docker({ host: dockerHost, protocol: "http", port: Number(process.env.DOCKER_PORT || 2375), timeout: 5000 });
 const app = express();
@@ -22,12 +23,27 @@ const serviceProxy = httpProxy.createProxyServer({ ws: true, changeOrigin: true,
 app.disable("x-powered-by");
 app.use(express.json({ limit: "256kb" }));
 
-function hasAccess(request) {
-  return !requireAccess || Boolean(request.headers["cf-access-jwt-assertion"] || request.headers["cf-access-authenticated-user-email"]);
+function safeTokenMatch(candidate) {
+  if (!candidate || !localAccessToken) return false;
+  const provided = Buffer.from(candidate);
+  const expected = Buffer.from(localAccessToken);
+  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
+
+function localRequestToken(request, url) {
+  const authorization = String(request.headers.authorization || "");
+  if (authorization.startsWith("Bearer ")) return authorization.slice(7);
+  return url?.searchParams.get("access_token") || "";
+}
+
+function hasAccess(request, url) {
+  if (!requireAccess) return true;
+  if (request.headers["cf-access-jwt-assertion"] || request.headers["cf-access-authenticated-user-email"]) return true;
+  return request.headers["x-mediactl-local"] === "1" && safeTokenMatch(localRequestToken(request, url));
 }
 
 function accessGuard(request, response, next) {
-  if (!hasAccess(request)) return response.status(401).json({ error: "Cloudflare Access identity required." });
+  if (!hasAccess(request)) return response.status(401).json({ error: "Cloudflare Access identity or local access token required." });
   next();
 }
 
@@ -123,6 +139,8 @@ app.get("/api/services/:id/logs", asyncRoute(async (request, response) => {
   if (!service) return response.status(404).json({ error: "Service not found." });
   if (!service.container) return response.status(400).json({ error: "No Docker container is configured for this service." });
   const output = await docker.getContainer(service.container).logs({ stdout: true, stderr: true, timestamps: true, tail: 250 });
+  // Docker multiplexing prefixes contain non-printable bytes that are unsafe to render.
+  // eslint-disable-next-line no-control-regex
   const clean = output.toString("utf8").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
   response.type("text/plain").send(clean.slice(-100_000));
 }));
@@ -143,6 +161,7 @@ app.post("/api/stack/restart", mutationGuard, asyncRoute(async (_request, respon
 }));
 
 app.use((error, _request, response, _next) => {
+  void _next;
   console.error(error);
   response.status(error.statusCode && error.statusCode < 500 ? error.statusCode : 500).json({ error: error.message || "Unexpected server error." });
 });
@@ -151,12 +170,14 @@ function sanitizedProxyHeaders(headers) {
   const next = { ...headers };
   delete next["cf-access-jwt-assertion"];
   delete next["cf-access-authenticated-user-email"];
+  delete next["x-mediactl-local"];
+  delete next.authorization;
   delete next.cookie;
   return next;
 }
 
 async function proxyRequest(request, response) {
-  if (!hasAccess(request)) return response.writeHead(401).end("Cloudflare Access identity required.");
+  if (!hasAccess(request)) return response.writeHead(401).end("Cloudflare Access identity or local access token required.");
   const config = await loadConfig();
   const requestHost = String(request.headers.host || "").split(":")[0].toLowerCase();
   const service = config.services.find((item) => item.enabled && item.publicHost.toLowerCase() === requestHost);
@@ -223,7 +244,7 @@ server.on("upgrade", async (request, socket, head) => {
   try {
     const url = new URL(request.url, "http://localhost");
     if (url.pathname === "/ws/terminal") {
-      if (!hasAccess(request)) return socket.destroy();
+      if (!hasAccess(request, url)) return socket.destroy();
       const terminal = findTerminal(await loadConfig(), url.searchParams.get("target"));
       if (!terminal) return socket.destroy();
       terminalWss.handleUpgrade(request, socket, head, (websocket) => terminalWss.emit("connection", websocket, request, terminal));

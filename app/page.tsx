@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 type Color = "violet" | "purple" | "blue" | "indigo" | "amber" | "cyan" | "sky" | "green";
 type Service = { id: string; name: string; monogram: string; description: string; host: string; port: number; scheme: "http" | "https"; publicHost: string; container: string; color: Color; enabled: boolean };
@@ -12,19 +12,33 @@ type Status = { sampledAt: string; uptime: number; services: ServiceStatus[] };
 
 const emptyConfig: Config = { site: { name: "mediactl", node: "server", address: "local" }, services: [], terminals: [] };
 const colors: Color[] = ["violet", "purple", "blue", "indigo", "amber", "cyan", "sky", "green"];
+const localTokenKey = "mediactl-local-access-token";
+
+class UnauthorizedError extends Error {}
+
+function authHeaders() {
+  if (typeof window === "undefined") return {};
+  const token = window.sessionStorage.getItem(localTokenKey);
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
 
 async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(url, { ...options, headers: { "content-type": "application/json", "x-mediactl-request": "1", ...options.headers } });
+  const response = await fetch(url, { ...options, headers: { "content-type": "application/json", "x-mediactl-request": "1", ...authHeaders(), ...options.headers } });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
+    if (response.status === 401) throw new UnauthorizedError(body.error || "Access token required.");
     throw new Error(body.error || `Request failed (${response.status})`);
   }
   return response.json();
 }
 
 async function apiText(url: string) {
-  const response = await fetch(url, { headers: { "x-mediactl-request": "1" } });
-  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Request failed (${response.status})`);
+  const response = await fetch(url, { headers: { "x-mediactl-request": "1", ...authHeaders() } });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    if (response.status === 401) throw new UnauthorizedError(body.error || "Access token required.");
+    throw new Error(body.error || `Request failed (${response.status})`);
+  }
   return response.text();
 }
 
@@ -42,7 +56,8 @@ function formatUptime(seconds = 0) {
 }
 
 function serviceUrl(service: Service) {
-  return `${typeof window !== "undefined" && window.location.protocol === "http:" ? "http" : "https"}://${service.publicHost}`;
+  if (typeof window !== "undefined" && window.location.protocol === "http:") return `${service.scheme}://${service.host}:${service.port}`;
+  return `https://${service.publicHost}`;
 }
 
 function TerminalPane({ target, onState }: { target: TerminalTarget; onState: (state: string) => void }) {
@@ -72,7 +87,10 @@ function TerminalPane({ target, onState }: { target: TerminalTarget; onState: (s
       fit.fit();
       terminal.writeln(`\x1b[38;5;141mmediactl\x1b[0m connecting to ${target.username}@${target.host}…\r\n`);
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(`${protocol}//${window.location.host}/ws/terminal?target=${encodeURIComponent(target.id)}`);
+      const query = new URLSearchParams({ target: target.id });
+      const localToken = window.sessionStorage.getItem(localTokenKey);
+      if (localToken) query.set("access_token", localToken);
+      const socket = new WebSocket(`${protocol}//${window.location.host}/ws/terminal?${query}`);
       socketRef.current = socket;
       onState("connecting");
       socket.onopen = () => socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
@@ -115,19 +133,36 @@ export default function Home() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [authRequired, setAuthRequired] = useState(false);
+  const [accessToken, setAccessToken] = useState("");
 
-  const refreshStatus = useCallback(async () => {
-    try { setStatus(await api<Status>("/api/status")); } catch (cause) { setError((cause as Error).message); }
+  const handleFailure = useCallback((cause: unknown) => {
+    if (cause instanceof UnauthorizedError) {
+      window.sessionStorage.removeItem(localTokenKey);
+      setAuthRequired(true);
+      setError("");
+      return;
+    }
+    setError((cause as Error).message);
   }, []);
 
+  const refreshStatus = useCallback(async () => {
+    try { setStatus(await api<Status>("/api/status")); } catch (cause) { handleFailure(cause); }
+  }, [handleFailure]);
+
+  const loadDashboard = useCallback(async () => {
+    try {
+      const value = await api<Config>("/api/config");
+      setConfig(value); setDraft(structuredClone(value)); setSelectedTerminal(value.terminals[0]?.id || ""); setAuthRequired(false);
+      await refreshStatus();
+    } catch (cause) { handleFailure(cause); }
+  }, [handleFailure, refreshStatus]);
+
   useEffect(() => {
-    void api<Config>("/api/config").then((value) => {
-      setConfig(value); setDraft(structuredClone(value)); setSelectedTerminal(value.terminals[0]?.id || "");
-    }).catch((cause) => setError(cause.message));
-    void refreshStatus();
+    const initialLoad = window.setTimeout(() => void loadDashboard(), 0);
     const timer = window.setInterval(refreshStatus, 12_000);
-    return () => window.clearInterval(timer);
-  }, [refreshStatus]);
+    return () => { window.clearTimeout(initialLoad); window.clearInterval(timer); };
+  }, [loadDashboard, refreshStatus]);
 
   useEffect(() => {
     if (!notice) return;
@@ -161,6 +196,28 @@ export default function Home() {
   const updateService = (index: number, patch: Partial<Service>) => setDraft((current) => ({ ...current, services: current.services.map((service, itemIndex) => itemIndex === index ? { ...service, ...patch } : service) }));
   const updateTerminal = (index: number, patch: Partial<TerminalTarget>) => setDraft((current) => ({ ...current, terminals: current.terminals.map((target, itemIndex) => itemIndex === index ? { ...target, ...patch } : target) }));
 
+  const unlockLocal = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const token = accessToken.trim();
+    if (!token) return;
+    window.sessionStorage.setItem(localTokenKey, token);
+    setAccessToken("");
+    await loadDashboard();
+  };
+
+  if (authRequired) return (
+    <main className="local-login">
+      <form className="login-card" onSubmit={(event) => void unlockLocal(event)}>
+        <span>LOCAL ACCESS</span>
+        <h1>Unlock mediactl</h1>
+        <p>Enter the <code>LOCAL_ACCESS_TOKEN</code> from the <code>.env</code> file on this LXC.</p>
+        <label>Access token<input type="password" autoComplete="current-password" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} /></label>
+        <button className="primary" type="submit" disabled={!accessToken.trim()}>Open dashboard</button>
+        <small>The token stays in this browser tab and is cleared when the tab closes.</small>
+      </form>
+    </main>
+  );
+
   return (
     <main className="dashboard">
       <header className="topbar">
@@ -178,7 +235,7 @@ export default function Home() {
 
       {tab === "services" ? (
         <section className="workspace services-view">
-          <div className="section-bar"><div><h1>Services</h1><span>Container stats sampled {status ? Math.max(0, Math.round((Date.now() - new Date(status.sampledAt).getTime()) / 1000)) : "—"}s ago</span></div><div className="actions"><button onClick={() => { setDraft(structuredClone(config)); setSettingsOpen(true); }}>Edit cards</button><button className="primary" disabled={Boolean(busy)} onClick={() => void mutate("Stack restart", () => api("/api/stack/restart", { method: "POST" }))}>Restart stack</button></div></div>
+          <div className="section-bar"><div><h1>Services</h1><span>{status ? "Container stats refreshed every 12s" : "Waiting for container stats"}</span></div><div className="actions"><button onClick={() => { setDraft(structuredClone(config)); setSettingsOpen(true); }}>Edit cards</button><button className="primary" disabled={Boolean(busy)} onClick={() => void mutate("Stack restart", () => api("/api/stack/restart", { method: "POST" }))}>Restart stack</button></div></div>
           <div className="service-grid">
             {enabledServices.map((service) => {
               const item = statusMap.get(service.id);
@@ -205,7 +262,7 @@ export default function Home() {
         </section>
       )}
 
-      {settingsOpen && <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && setSettingsOpen(false)}><aside className="settings-panel"><div className="settings-header"><div><span>CONFIGURATION</span><h2>Dashboard settings</h2></div><button onClick={() => setSettingsOpen(false)}>×</button></div><div className="settings-body">
+      {settingsOpen && <div className="overlay" role="button" tabIndex={-1} aria-label="Close configuration" onKeyDown={(event) => event.key === "Escape" && setSettingsOpen(false)} onMouseDown={(event) => event.target === event.currentTarget && setSettingsOpen(false)}><aside className="settings-panel"><div className="settings-header"><div><span>CONFIGURATION</span><h2>Dashboard settings</h2></div><button onClick={() => setSettingsOpen(false)}>×</button></div><div className="settings-body">
         <fieldset><legend>Dashboard</legend><div className="form-grid"><label>Name<input value={draft.site.name} onChange={(event) => setDraft({ ...draft, site: { ...draft.site, name: event.target.value } })} /></label><label>Node label<input value={draft.site.node} onChange={(event) => setDraft({ ...draft, site: { ...draft.site, node: event.target.value } })} /></label><label>Node address<input value={draft.site.address} onChange={(event) => setDraft({ ...draft, site: { ...draft.site, address: event.target.value } })} /></label></div></fieldset>
         <fieldset><legend><span>Service cards</span><button onClick={() => setDraft((current) => ({ ...current, services: [...current.services, { id: `service-${current.services.length + 1}`, name: "New service", monogram: "NS", description: "Managed service", host: "10.0.0.20", port: 8080, scheme: "http", publicHost: "service.example.com", container: "", color: "violet", enabled: true }] }))}>+ Add card</button></legend>{draft.services.map((service, index) => <div className="config-card" key={`${service.id}-${index}`}><div className="config-card-title"><strong>{service.name || "Untitled service"}</strong><button className="danger-link" onClick={() => setDraft((current) => ({ ...current, services: current.services.filter((_, itemIndex) => itemIndex !== index) }))}>Remove</button></div><div className="form-grid"><label>Name<input value={service.name} onChange={(event) => updateService(index, { name: event.target.value })} /></label><label>ID<input value={service.id} onChange={(event) => updateService(index, { id: event.target.value })} /></label><label>IP / host<input value={service.host} onChange={(event) => updateService(index, { host: event.target.value })} /></label><label>Port<input type="number" value={service.port} onChange={(event) => updateService(index, { port: Number(event.target.value) })} /></label><label>Public hostname<input value={service.publicHost} onChange={(event) => updateService(index, { publicHost: event.target.value })} /></label><label>Docker container<input value={service.container} onChange={(event) => updateService(index, { container: event.target.value })} /></label><label className="wide">Description<input value={service.description} onChange={(event) => updateService(index, { description: event.target.value })} /></label><label>Color<select value={service.color} onChange={(event) => updateService(index, { color: event.target.value as Color })}>{colors.map((color) => <option key={color}>{color}</option>)}</select></label><label className="check"><input type="checkbox" checked={service.enabled} onChange={(event) => updateService(index, { enabled: event.target.checked })} />Show card</label></div></div>)}</fieldset>
         <fieldset><legend><span>SSH terminal targets</span><button onClick={() => setDraft((current) => ({ ...current, terminals: [...current.terminals, { id: `host-${current.terminals.length + 1}`, name: "new-host", host: "10.0.0.10", port: 22, username: "mediaadmin", keyFile: "id_ed25519", hostFingerprint: "" }] }))}>+ Add host</button></legend>{draft.terminals.map((target, index) => <div className="config-card" key={`${target.id}-${index}`}><div className="config-card-title"><strong>{target.name}</strong><button className="danger-link" onClick={() => setDraft((current) => ({ ...current, terminals: current.terminals.filter((_, itemIndex) => itemIndex !== index) }))}>Remove</button></div><div className="form-grid"><label>Name<input value={target.name} onChange={(event) => updateTerminal(index, { name: event.target.value })} /></label><label>ID<input value={target.id} onChange={(event) => updateTerminal(index, { id: event.target.value })} /></label><label>IP / host<input value={target.host} onChange={(event) => updateTerminal(index, { host: event.target.value })} /></label><label>Port<input type="number" value={target.port} onChange={(event) => updateTerminal(index, { port: Number(event.target.value) })} /></label><label>SSH username<input value={target.username} onChange={(event) => updateTerminal(index, { username: event.target.value })} /></label><label>Key file<input value={target.keyFile} onChange={(event) => updateTerminal(index, { keyFile: event.target.value })} /></label><label className="wide">Host fingerprint (optional SHA256)<input value={target.hostFingerprint} onChange={(event) => updateTerminal(index, { hostFingerprint: event.target.value })} placeholder="SHA256:…" /></label></div></div>)}</fieldset>
