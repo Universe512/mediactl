@@ -1,0 +1,97 @@
+site:
+  name: mediactl
+  node: proxmox
+  address: 10.0.0.4
+
+services:
+  - id: jellyfin
+    name: Jellyfin
+    monogram: JF
+    description: Media library and streaming server.
+    host: 10.0.0.20
+    port: 8096
+    scheme: http
+    publicHost: jellyfin.example.com
+    container: jellyfin
+    color: violet
+    enabled: true
+  - id: jellyseerr
+    name: Jellyseerr
+    monogram: JS
+    description: Request portal for movies and shows.
+    host: 10.0.0.20
+    port: 5055
+    scheme: http
+    publicHost: requests.example.com
+    container: jellyseerr
+    color: purple
+    enabled: true
+  - id: radarr
+    name: Radarr
+    monogram: RA
+    description: Movie collection manager and downloader.
+    host: 10.0.0.20
+    port: 7878
+    scheme: http
+    publicHost: radarr.example.com
+    container: radarr
+    color: blue
+    enabled: true
+  - id: sonarr
+    name: Sonarr
+    monogram: SO
+    description: TV series manager and downloader.
+    host: 10.0.0.20
+    port: 8989
+    scheme: http
+    publicHost: sonarr.example.com
+    container: sonarr
+    color: indigo
+    enabled: true
+  - id: dispatcharr
+    name: Dispatcharr
+    monogram: DA
+    description: IPTV channel routing and monitoring.
+    host: 10.0.0.20
+    port: 9191
+    scheme: http
+    publicHost: dispatcharr.example.com
+    container: dispatcharr
+    color: amber
+    enabled: true
+  - id: prowlarr
+    name: Prowlarr
+    monogram: PR
+    description: Indexer manager feeding Radarr and Sonarr.
+    host: 10.0.0.20
+    port: 9696
+    scheme: http
+    publicHost: prowlarr.example.com
+    container: prowlarr
+    color: cyan
+    enabled: true
+  - id: qbittorrent
+    name: qBittorrent
+    monogram: QB
+    description: Download queue and transfer status.
+    host: 10.0.0.20
+    port: 8080
+    scheme: http
+    publicHost: downloads.example.com
+    container: qbittorrent
+    color: sky
+    enabled: true
+
+terminals:
+  - id: proxmox
+    name: proxmox
+    host: host.docker.internal
+    port: 22
+    username: mediaadmin
+    keyFile: id_ed25519
+  - id: media-lxc
+    name: media-lxc
+    host: 10.0.0.20
+    port: 22
+    username: mediaadmin
+    keyFile: id_ed25519

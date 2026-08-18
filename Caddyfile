@@ -1,0 +1,25 @@
+{
+  auto_https off
+  admin off
+}
+
+:80 {
+  encode zstd gzip
+
+  @dashboard host {$DASHBOARD_SUBDOMAIN}.{$ROOT_DOMAIN}
+  handle @dashboard {
+    @manager path /api/* /ws/*
+    handle @manager {
+      reverse_proxy manager:4000
+    }
+    handle {
+      reverse_proxy portal:3000
+    }
+  }
+
+  # Every other hostname is resolved dynamically from /data/config.yaml.
+  # This lets the dashboard change service IPs and ports without reloading Caddy.
+  handle {
+    reverse_proxy manager:4000
+  }
+}

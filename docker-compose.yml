@@ -1,0 +1,64 @@
+services:
+  portal:
+    build:
+      context: .
+      target: portal
+    restart: unless-stopped
+    networks: [gateway]
+
+  manager:
+    build:
+      context: .
+      target: manager
+    restart: unless-stopped
+    environment:
+      DOCKER_HOST: http://docker-proxy
+      DOCKER_PORT: 2375
+      REQUIRE_CF_ACCESS: ${REQUIRE_CF_ACCESS:-true}
+    volumes:
+      - mediactl-data:/data
+      - ./secrets:/run/secrets/ssh:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    depends_on: [docker-proxy]
+    networks: [gateway, docker-api]
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      POST: 1
+      PING: 1
+      INFO: 1
+      VERSION: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-api]
+
+  gateway:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      ROOT_DOMAIN: ${ROOT_DOMAIN}
+      DASHBOARD_SUBDOMAIN: ${DASHBOARD_SUBDOMAIN:-media}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on: [portal, manager]
+    networks: [gateway]
+
+  tunnel:
+    image: cloudflare/cloudflared:2026.7.3
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on: [gateway]
+    networks: [gateway]
+
+volumes:
+  mediactl-data:
+
+networks:
+  gateway:
+    driver: bridge
+  docker-api:
+    internal: true

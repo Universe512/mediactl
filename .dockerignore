@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.wrangler
+dev.log
+dev-error.log
+npm-debug.log
+.env
+.test-data
+secrets
